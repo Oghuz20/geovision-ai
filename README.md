@@ -11,7 +11,7 @@ monitoring using Sentinel-2 satellite imagery, applied to a real case study area
 
 ## Live demo
 
-**Dashboard:** [link to be added after Streamlit deployment]
+**Dashboard:** [geovision-ai-baku.streamlit.app](https://geovision-ai-baku.streamlit.app/)
 
 ## Results summary
 
