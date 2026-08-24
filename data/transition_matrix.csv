@@ -1,0 +1,8 @@
+,Ignore,Tree cover,Low vegetation,Cropland,Built-up,Bare/sparse,Water/wetland
+Ignore,0,0,0,0,0,0,0
+Tree cover,0,14954,3214,29,1566,768,24397
+Low vegetation,0,15320,147314,4693,29893,14200,13484
+Cropland,0,218,21629,5935,1195,3900,2510
+Built-up,0,27956,21643,52,819831,13059,1480
+Bare/sparse,0,1672,84830,296,84076,57784,32039
+Water/wetland,0,1798,1255,29,12,592,132157

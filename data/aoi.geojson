@@ -1,0 +1,38 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Khirdalan-Masazir-Binagadi AOI"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              49.73,
+              40.53
+            ],
+            [
+              49.87,
+              40.53
+            ],
+            [
+              49.87,
+              40.41
+            ],
+            [
+              49.73,
+              40.41
+            ],
+            [
+              49.73,
+              40.53
+            ]
+          ]
+        ]
+      }
+    }
+  ]
+}

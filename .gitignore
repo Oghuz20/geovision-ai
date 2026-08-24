@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Virtual environments
+venv/
+env/
+.venv/
+
+# Large files that should NEVER be committed here --
+# checkpoints/ should only ever contain README.md (see checkpoints/README.md
+# for the actual download link); this is a safety net in case a .pth file
+# ever accidentally lands in that folder locally.
+checkpoints/*.pth
+*.pth
+
+# The full ESA WorldCover tile (~50MB+, out of AOI scope) --
+# only the pre-cropped worldcover2021_aoi_remapped.npy belongs in data/
+*worldcover*Map.tif
+ESA_WorldCover*.tif
+
+# The full training dataset shards (~11.6GB) -- hosted on Kaggle, not here
+*.npz
+
+# Misc
+*.zip
