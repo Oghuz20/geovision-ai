@@ -2,7 +2,7 @@
 
 **AI-Based Urban Area Analysis and Planning Support System Using Satellite Imagery**
 
-Submitted to the Azərkosmos Earth Remote Sensing Competition 2026 (Urban Planning and
+Submitted to the Azercosmos Earth Remote Sensing Competition 2026 (Urban Planning and
 Architecture theme).
 
 An AI-based system for automated land-cover classification and multi-temporal urban growth
