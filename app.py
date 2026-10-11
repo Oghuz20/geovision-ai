@@ -52,6 +52,7 @@ class CFG:
     BUILTUP_ID = 4
     WATER_ID = 6
     IGNORE_ID = 0
+    PATCH_SIZE = 256            # inference patch size used in phase 4
 
     AOI_BOUNDS = (49.73, 40.41, 49.87, 40.53)   # min_lon, min_lat, max_lon, max_lat
     AOI_NAME = "Khirdalan - Masazir - Binagadi, Azerbaijan"
@@ -472,6 +473,15 @@ def main():
         st.divider()
 
         st.subheader("Known limitations")
+        # Values below are computed from the loaded maps, not hard-coded.
+        bare1, bare2 = stats1["Bare/sparse"]["km2"], stats2["Bare/sparse"]["km2"]
+        bare_delta = bare2 - bare1
+        bare_pct = bare_delta / bare1 * 100 if bare1 > 0 else 0.0
+        water_delta = stats2["Water/wetland"]["km2"] - stats1["Water/wetland"]["km2"]
+        built_delta = stats2["Built-up"]["km2"] - stats1["Built-up"]["km2"]
+        map_h, map_w = lc1.shape
+        pad_row_pct = ((-map_h) % CFG.PATCH_SIZE) / CFG.PATCH_SIZE * 100
+        pad_col_pct = ((-map_w) % CFG.PATCH_SIZE) / CFG.PATCH_SIZE * 100
         st.markdown(
             "- **Labels are not ground truth.** The model learns ESA WorldCover, a model-derived "
             "product with its own errors; no independent ground truth exists for this area.\n"
@@ -487,6 +497,20 @@ def main():
             "apparent change, and the transition matrix is strongly asymmetric between some "
             "classes, which points to systematic differences between the two dates "
             "(vegetation greenness or radiometry), not only random noise.\n"
+            f"- **Date-to-date class swings**: between the two dates, mapped Bare/sparse changes by "
+            f"{bare_delta:+.1f} km^2 ({bare_pct:+.0f}%) and Water/wetland by {water_delta:+.1f} km^2, "
+            f"compared with {built_delta:+.1f} km^2 for Built-up. Swings of this size in non-urban "
+            "classes can reflect radiometric or seasonal differences between the two scenes rather "
+            "than real land-use change, so conversion shares and hotspots are not confirmed "
+            "change.\n"
+            "- **Water class vs. NDWI**: see the NDWI check above. Low precision means the model "
+            "labels more water than an NDWI reference does; shadows, dark surfaces and salt or oil "
+            "lakes are possible causes, and none has been isolated.\n"
+            f"- **Edge padding**: inference pads the study area with zeros to a multiple of "
+            f"{CFG.PATCH_SIZE} px (last patch column {pad_col_pct:.0f}% padding, last row "
+            f"{pad_row_pct:.0f}%), so hotspot cells near the right and bottom edges may be "
+            "artifacts. Interior hotspots are more reliable, but none has yet been confirmed on "
+            "high-resolution imagery.\n"
             "- **Imagery**: one June scene per year, so rainfall-driven vegetation differences "
             "cannot be separated from real change. No cloud/shadow mask (SCL) was applied; cloud "
             "shadow in the 2026 scene may affect water extent near the northern lake.\n"
