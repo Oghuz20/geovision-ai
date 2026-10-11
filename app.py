@@ -5,7 +5,7 @@ Run with:
     streamlit run app.py
 
 Reads all previously computed outputs (no model inference happens here --
-this is a viewer over what Phases 4-8 already produced):
+this is a viewer over what notebooks/02_deployment_and_analysis.ipynb already produced):
     data/2021_RGBNIR_aoi.npy, data/2026_RGBNIR_aoi.npy
     data/2021_landcover.npy, data/2026_landcover.npy
     data/nonbuiltup_to_builtup_mask.npy
@@ -50,6 +50,7 @@ class CFG:
 
     GREEN_IDS = (1, 2)
     BUILTUP_ID = 4
+    WATER_ID = 6
     IGNORE_ID = 0
 
     AOI_BOUNDS = (49.73, 40.41, 49.87, 40.53)   # min_lon, min_lat, max_lon, max_lat
@@ -62,18 +63,16 @@ class CFG:
     TEST_PRECISION = 0.7584
     TEST_RECALL = 0.7706
     TEST_F1 = 0.7385
+    CROPLAND_TEST_IOU = 0.34
+    TEST_BUILTUP_DOMINANT_PATCHES = 44      # of 13,407 test patches
 
-    WORLDCOVER_OVERALL_AGREEMENT = 71.0
-    WORLDCOVER_PER_CLASS = {
+    WORLDCOVER_OVERALL_AGREEMENT = 71.0     # pixel agreement, %
+    WORLDCOVER_PER_CLASS = {                # per-class IoU vs WorldCover, %
         "Tree cover": 5.8, "Low vegetation": 37.3, "Cropland": 12.1,
         "Built-up": 77.9, "Bare/sparse": 19.4, "Water/wetland": 65.8,
     }
 
     WORLDCOVER_FIG_PATH = Path("figures") / "worldcover_validation.png"
-    NDWI_FIG_PATHS = {
-        "2021": Path("figures") / "water_sanity_check_2021.png",
-        "2026": Path("figures") / "water_sanity_check_2026.png",
-    }
 
 
 # =================================================================
@@ -120,26 +119,70 @@ def compute_area_stats(landcover: np.ndarray) -> dict:
     return stats
 
 
-def compute_planning_indicators(stats1: dict, stats2: dict, expansion_mask, hotspot_grid) -> list:
+def built_up_flows(lc1: np.ndarray, lc2: np.ndarray):
+    """Gross gain, reverse flow and net change of built-up area, in km^2."""
+    valid = (lc1 != CFG.IGNORE_ID) & (lc2 != CFG.IGNORE_ID)
+    b1, b2 = lc1 == CFG.BUILTUP_ID, lc2 == CFG.BUILTUP_ID
+    gain = (b2 & ~b1 & valid).sum() / CFG.PIXELS_PER_KM2
+    loss = (b1 & ~b2 & valid).sum() / CFG.PIXELS_PER_KM2
+    return gain, loss, gain - loss
+
+
+def ndwi_water_check(rgbnir: np.ndarray, lc: np.ndarray) -> dict:
+    """Consistency of the model's Water/wetland class with an NDWI > 0 water mask.
+
+    NDWI = (Green - NIR) / (Green + NIR) on the uint8-scaled bands. NDWI is a
+    reference index, not ground truth: shadows (including cloud shadow) can also
+    have NDWI > 0. Returns precision, recall and IoU of model-water vs NDWI-water.
+    """
+    img = rgbnir.astype(np.float32)
+    green, nir = img[..., 1], img[..., 3]
+    ref = ((green - nir) / (green + nir + 1e-6)) > 0.0
+    model = lc == CFG.WATER_ID
+    tp = float((model & ref).sum())
+    n_model, n_ref, union = float(model.sum()), float(ref.sum()), float((model | ref).sum())
+    return {
+        "precision": tp / n_model if n_model else float("nan"),
+        "recall": tp / n_ref if n_ref else float("nan"),
+        "iou": tp / union if union else float("nan"),
+        "model_km2": n_model / CFG.PIXELS_PER_KM2,
+        "ndwi_km2": n_ref / CFG.PIXELS_PER_KM2,
+    }
+
+
+def compute_planning_indicators(stats1: dict, stats2: dict, expansion_mask, hotspot_grid,
+                                lc1=None, lc2=None) -> list:
     indicators = []
 
     green_pct = stats2["Green space"]["pct"]
     status = "OK" if green_pct >= 15.0 else "FLAG"
-    indicators.append(("Green space ratio", status, f"{green_pct:.1f}%",
-                        "Above the 15% reference level." if status == "OK"
-                        else "Below the 15% reference level -- potential loss of green areas."))
+    indicators.append(("Vegetated cover (tree + low vegetation)", status, f"{green_pct:.1f}%",
+                        "Above the 15% illustrative reference level. This includes semi-desert "
+                        "scrub, not only urban green space." if status == "OK"
+                        else "Below the 15% illustrative reference level -- potential loss of "
+                             "vegetated cover."))
 
     crop1, crop2 = stats1["Cropland"]["km2"], stats2["Cropland"]["km2"]
     loss_pct = (crop1 - crop2) / crop1 * 100 if crop1 > 0 else 0.0
     status = "FLAG" if loss_pct >= 25.0 else "WATCH"
-    indicators.append(("Agricultural land loss", status, f"{loss_pct:.0f}%",
-                        "Notable conversion of agricultural land." if status == "FLAG"
-                        else "Below the 25% flag threshold."))
+    if status == "FLAG":
+        message = f"Mapped cropland fell by {crop1 - crop2:.2f} km^2."
+        if lc1 is not None and lc2 is not None:
+            to_built = ((lc1 == 3) & (lc2 == CFG.BUILTUP_ID)).sum() / CFG.PIXELS_PER_KM2
+            to_lowveg = ((lc1 == 3) & (lc2 == 2)).sum() / CFG.PIXELS_PER_KM2
+            message += (f" Of this, {to_built:.2f} km^2 became built-up and "
+                        f"{to_lowveg:.2f} km^2 became low vegetation (a known confusion pair).")
+        message += (f" Cropland test IoU is only {CFG.CROPLAND_TEST_IOU:.2f}, so treat this as a "
+                    "monitoring signal, not a confirmed loss.")
+    else:
+        message = "Below the 25% flag threshold."
+    indicators.append(("Agricultural land loss", status, f"{loss_pct:.0f}%", message))
 
     builtup1, builtup2 = stats1["Built-up"]["pct"], stats2["Built-up"]["pct"]
     status = "FLAG" if builtup2 >= 60 else ("WATCH" if builtup2 >= 55 else "OK")
     indicators.append(("Built-up saturation", status, f"{builtup2:.1f}%",
-                        f"Growth of {builtup2 - builtup1:+.1f} points since the earlier date."))
+                        f"Map-based growth of {builtup2 - builtup1:+.1f} points since the earlier "
+                        "date; see the Overview tab for the noise caveat."))
 
     if expansion_mask is not None and hotspot_grid is not None:
         total_expansion_km2 = expansion_mask.sum() / CFG.PIXELS_PER_KM2
@@ -148,14 +191,16 @@ def compute_planning_indicators(stats1: dict, stats2: dict, expansion_mask, hots
         status = "FLAG" if diffuse_pct >= 70 else "OK"
         indicators.append(("Development pattern", status, f"{diffuse_pct:.0f}% diffuse",
                             "Growth is spread broadly with a few concentrated hotspots -- "
-                            "potential sprawl/fragmentation." if status == "FLAG"
+                            "potential sprawl/fragmentation. Scattered changed pixels can also "
+                            "come from classification noise, so confirm on imagery."
+                            if status == "FLAG"
                             else "Development is relatively concentrated."))
 
     return indicators
 
 
 # =================================================================
-# Plot builders (return a Figure -- no file I/O, unlike phase9_figures.py)
+# Plot builders (return a Figure -- no file I/O)
 # =================================================================
 def plot_rgb(rgbnir, title):
     fig, ax = plt.subplots(figsize=(6, 6))
@@ -202,7 +247,7 @@ def plot_change_detection(lc1, lc2):
 
     colors = ["#D9D9D9", "#F39C12", "#C0392B", "#8E5A2B", "#95A5A6"]
     labels = ["Unchanged", "Vegetation -> Built-up", "Cropland -> Built-up",
-              "Bare -> Built-up", "Other change (noise/boundary)"]
+              "Bare -> Built-up", "Other change (unverified; may include noise)"]
 
     fig, ax = plt.subplots(figsize=(7, 6))
     ax.imshow(np.ma.masked_where(~valid, change_map), cmap=ListedColormap(colors), vmin=0, vmax=4)
@@ -264,7 +309,7 @@ def main():
     hotspot_grid = load_array(CFG.HOTSPOT_GRID_PATH)
 
     if lc1 is None or lc2 is None:
-        st.error("Land-cover outputs not found in data/. Run Phase 4 (segmentation) first.")
+        st.error("Land-cover outputs not found in data/. Run notebooks/02_deployment_and_analysis.ipynb first.")
         return
 
     tab_overview, tab_explorer, tab_change, tab_hotspots, tab_indicators, tab_validation = st.tabs(
@@ -286,13 +331,22 @@ def main():
             m1, m2, m3 = st.columns(3)
             m1.metric("Built-up", f"{stats2['Built-up']['pct']:.1f}%",
                       f"{stats2['Built-up']['pct'] - stats1['Built-up']['pct']:+.1f} pts")
-            m2.metric("Green space", f"{stats2['Green space']['pct']:.1f}%",
+            m2.metric("Vegetated cover", f"{stats2['Green space']['pct']:.1f}%",
                       f"{stats2['Green space']['pct'] - stats1['Green space']['pct']:+.1f} pts")
             m3.metric("Cropland", f"{stats2['Cropland']['pct']:.1f}%",
                       f"{stats2['Cropland']['pct'] - stats1['Cropland']['pct']:+.1f} pts")
 
-            if expansion_mask is not None:
-                st.metric("Total urban expansion", f"{expansion_mask.sum() / CFG.PIXELS_PER_KM2:.2f} km^2")
+            gain, loss, net = built_up_flows(lc1, lc2)
+            st.subheader("Built-up change (km^2)")
+            f1, f2, f3 = st.columns(3)
+            f1.metric("Net change", f"{net:+.2f}")
+            f2.metric("Gross gain", f"{gain:.2f}", help="Non-built-up in 2021 -> built-up in 2026")
+            f3.metric("Reverse flow", f"{loss:.2f}", help="Built-up in 2021 -> other class in 2026")
+            st.caption("Real built-up loss over five years is expected to be small, so a large "
+                       "reverse flow indicates classification noise between the two dates. When it "
+                       "is comparable to the net change, the net growth is not statistically "
+                       "established. Conversion shares and hotspots are derived from the gross "
+                       "mask and share this noise.")
 
             st.subheader("Land-use balance, 2026")
             df = pd.DataFrame({
@@ -300,7 +354,7 @@ def main():
                 "Area (km^2)": [round(v["km2"], 2) for v in stats2.values()],
                 "Share (%)": [round(v["pct"], 1) for v in stats2.values()],
             })
-            st.dataframe(df, use_container_width=True, hide_index=True)
+            st.dataframe(df, width="stretch", hide_index=True)
             st.download_button(
                 "Download this table (CSV)",
                 data=df.to_csv(index=False).encode("utf-8"),
@@ -335,6 +389,8 @@ def main():
 
     # --- Change Detection ---
     with tab_change:
+        st.caption("Post-classification comparison: each date is classified independently, so an "
+                   "error in either map appears as change.")
         fig_change = plot_change_detection(lc1, lc2)
         st.pyplot(fig_change)
         fig_download_button(fig_change, "change_detection.png")
@@ -347,17 +403,21 @@ def main():
     # --- Development Hotspots ---
     with tab_hotspots:
         if hotspot_grid is not None and rgbnir2 is not None:
+            st.caption("Hotspots are counted on the gross expansion mask, which includes "
+                       "classification noise.")
             fig_hot = plot_hotspots(hotspot_grid, rgbnir2)
             st.pyplot(fig_hot)
             fig_download_button(fig_hot, "development_hotspots.png")
         else:
-            st.info("Hotspot data not found -- run Phase 7 first.")
+            st.info("Hotspot data not found -- run notebooks/02_deployment_and_analysis.ipynb first.")
 
     # --- Model Validation ---
     with tab_validation:
         st.subheader("Held-out test set performance")
-        st.caption("Measured on labeled Sentinel-2 tiles never seen during training -- "
-                   "not this study area specifically (see below for that check).")
+        st.caption("Measured on 5 labeled rasters never seen during training (pooled pixel IoU, "
+                   "flip test-time augmentation) -- not this study area specifically. The test "
+                   f"set is small: only {CFG.TEST_BUILTUP_DOMINANT_PATCHES} of 13,407 test patches "
+                   "are built-up-dominant, so built-up and cropland scores are statistically fragile.")
         c1, c2, c3, c4, c5 = st.columns(5)
         c1.metric("Mean IoU", f"{CFG.TEST_MEAN_IOU:.3f}")
         c2.metric("FWIoU", f"{CFG.TEST_FWIOU:.3f}")
@@ -367,58 +427,80 @@ def main():
 
         st.divider()
 
-        st.subheader("Real-AOI cross-validation vs. ESA WorldCover 2021")
-        st.caption("WorldCover 2021 is the same source dataset the training labels were built "
-                   "from -- this checks generalization to this specific, previously-unseen area. "
-                   "Note: grid-resized for comparison rather than fully CRS-reprojected, so this "
-                   "is an approximate agreement check, not a survey-grade confusion matrix.")
-        st.metric("Overall agreement", f"{CFG.WORLDCOVER_OVERALL_AGREEMENT:.1f}%")
+        st.subheader("Held-out-area check vs. ESA WorldCover 2021")
+        st.caption("WorldCover 2021 is the source of the training labels and has its own errors, "
+                   "so this measures consistency with a reference product, not accuracy against "
+                   "ground truth. The study area lies outside every training raster. Note: "
+                   "grid-resized for comparison rather than fully CRS-reprojected, so this is "
+                   "approximate, not a survey-grade confusion matrix.")
+        st.metric("Overall pixel agreement", f"{CFG.WORLDCOVER_OVERALL_AGREEMENT:.1f}%")
 
         wc_df = pd.DataFrame({
             "Class": list(CFG.WORLDCOVER_PER_CLASS.keys()),
-            "Agreement (%)": list(CFG.WORLDCOVER_PER_CLASS.values()),
+            "IoU vs WorldCover (%)": list(CFG.WORLDCOVER_PER_CLASS.values()),
         })
-        st.dataframe(wc_df, use_container_width=True, hide_index=True)
+        st.dataframe(wc_df, width="stretch", hide_index=True)
 
         if CFG.WORLDCOVER_FIG_PATH.exists():
-            st.image(str(CFG.WORLDCOVER_FIG_PATH), use_container_width=True)
+            st.image(str(CFG.WORLDCOVER_FIG_PATH), width="stretch")
         else:
-            st.info("WorldCover comparison figure not found -- run worldcover_validation.py first.")
+            st.info("WorldCover comparison figure (figures/worldcover_validation.png) not found.")
 
         st.divider()
 
-        st.subheader("Water-class sanity check (NDWI)")
-        st.caption("Independent, physics-based cross-check for the Water/wetland class -- "
-                   "no training data involved.")
+        st.subheader("Water-class consistency check (NDWI)")
+        st.caption("Computed live from the study-area imagery: pixels with NDWI > 0 are used as a "
+                   "reference water mask. NDWI is a reference index, not ground truth (shadows, "
+                   "including cloud shadow, can also have NDWI > 0). Precision = share of "
+                   "model-water pixels that NDWI also marks as water; recall = share of NDWI-water "
+                   "pixels the model also marks as water.")
         ndwi_cols = st.columns(2)
-        for col, (date_label, path) in zip(ndwi_cols, CFG.NDWI_FIG_PATHS.items()):
+        for col, (date_label, img, lc_d) in zip(
+                ndwi_cols, [("2021", rgbnir1, lc1), ("2026", rgbnir2, lc2)]):
             with col:
-                if path.exists():
-                    st.image(str(path), caption=date_label, use_container_width=True)
+                if img is not None:
+                    res = ndwi_water_check(img, lc_d)
+                    st.markdown(f"**{date_label}** -- model water {res['model_km2']:.2f} km^2, "
+                                f"NDWI water {res['ndwi_km2']:.2f} km^2")
+                    p1, p2, p3 = st.columns(3)
+                    p1.metric("Precision", f"{res['precision']:.2f}")
+                    p2.metric("Recall", f"{res['recall']:.2f}")
+                    p3.metric("IoU", f"{res['iou']:.2f}")
                 else:
-                    st.info(f"NDWI figure for {date_label} not found -- run water_sanity_check.py first.")
+                    st.info(f"Imagery for {date_label} not found in data/.")
 
         st.divider()
 
         st.subheader("Known limitations")
         st.markdown(
+            "- **Labels are not ground truth.** The model learns ESA WorldCover, a model-derived "
+            "product with its own errors; no independent ground truth exists for this area.\n"
             "- **Bare/sparse vs. Low vegetation boundary confusion**: the WorldCover comparison "
-            "above confirms the model systematically over-predicts Bare/sparse where the reference "
-            "data shows Low vegetation.\n"
-            "- **Water-extent changes near the northern lake** may be partly attributable to cloud "
-            "shadow in the 2026 source imagery rather than genuine water-level change -- see the "
-            "NDWI check above.\n"
-            "- **The held-out test set's geographic tile composition** underrepresents Built-up "
-            "and Cropland relative to train/validation, so the headline test metrics likely "
-            "understate true performance on those two classes somewhat.\n"
-            "- **Class-transition noise** (e.g. isolated Built-up <-> vegetation flips between "
-            "dates) reflects pixel-boundary classification noise, not real land-use change -- "
-            "handled explicitly as a separate category in the Change Detection tab."
+            "above indicates the model over-predicts Bare/sparse where the reference shows Low "
+            "vegetation. Bare/sparse <-> Built-up is also a likely confusion pair, which affects "
+            "the conversion-source shares.\n"
+            "- **Small test set**: its geographic tile composition underrepresents Built-up and "
+            "Cropland relative to train/validation (4 of 5 test rasters contain almost no "
+            "built-up), so the test scores for those two classes are statistically fragile "
+            "rather than reliably higher or lower.\n"
+            "- **Change detection by post-classification comparison**: errors in either map create "
+            "apparent change, and the transition matrix is strongly asymmetric between some "
+            "classes, which points to systematic differences between the two dates "
+            "(vegetation greenness or radiometry), not only random noise.\n"
+            "- **Imagery**: one June scene per year, so rainfall-driven vegetation differences "
+            "cannot be separated from real change. No cloud/shadow mask (SCL) was applied; cloud "
+            "shadow in the 2026 scene may affect water extent near the northern lake.\n"
+            "- **Inference**: non-overlapping patches and no test-time augmentation, unlike the "
+            "test evaluation, so patch seams are possible."
         )
 
     # --- Planning Indicators ---
     with tab_indicators:
-        indicators = compute_planning_indicators(stats1, stats2, expansion_mask, hotspot_grid)
+        st.caption("Thresholds are illustrative rule-of-thumb values, not official planning "
+                   "standards, and every indicator inherits the classification errors of the "
+                   "underlying maps. Read FLAG as 'worth checking', not as a confirmed finding.")
+        indicators = compute_planning_indicators(stats1, stats2, expansion_mask, hotspot_grid,
+                                                 lc1, lc2)
         for name, status, value, message in indicators:
             if status == "FLAG":
                 st.error(f"**{name}**: {value} -- {message}")
